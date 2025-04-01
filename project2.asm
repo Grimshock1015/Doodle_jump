@@ -85,6 +85,7 @@ jump_height:     .word 20      # max jump duration in frames
 score:           .word 0:4
 last_platform_index: .word 0
 font_colour:         .word 0x000000
+white_colour:        .word 0xFFFFFF
 digit_positions:
     .word 0x10008104   # ones at col 63
     .word 0x10008114   # tens at col 57
@@ -92,17 +93,22 @@ digit_positions:
     .word 0x10008134   # thousands at col 45
     
 scroll_counter: .word 0
+coin_base_row:            .word 0           # original base row (set at spawn)
+coin_animation_counter:   .word 0
+coin_animation_threshold: .word 20
+
 
 .globl main
 .text
 
 main:
-        lw $s0, base_address      # $s0 stores the base address for display
-        
+        	la  $s0, base_address   # Load the address of base_address
+	lw  $s0, 0($s0)         # Load the actual value (0x10008000) into $s0
         # Initialize draw flag
         jal randomise_platforms
         jal draw_bg_and_plat
 	jal init_draw_doodle
+	jal spawn_coin_above_platform
 #	li $t0, 16        # row
 #	li $t1, 31        # col (safe, no wrapping)
 #	la $t2, doodle_position
@@ -113,6 +119,7 @@ game_loop:
 	jal clear_doodle
 	jal read_input
 	jal clear_score
+
 	#Gravity timing logic
 	la $s7, gravity_counter
 	lw $s6, 0($s7)
@@ -127,13 +134,198 @@ game_loop:
 skip_gravity:
 	sw $s6, 0($s7)       # Update counter
 	jal maybe_scroll_camera
+	jal check_coin_pickup
 	jal draw_platforms
 	lw $t2, doodle_colour
 	jal draw_character_doodle
 	jal draw_score
+	jal animate_coin
 	jal delay_frame
 	j game_loop
+
+check_coin_pickup:
+	addi $sp, $sp, -4
+	sw $ra, 0($sp)
+
+	# Load doodle position
+	la $t0, doodle_position
+	lw $t1, 0($t0)         # doodle row
+	lw $t2, 4($t0)         # doodle col
+
+	# Load coin position
+	la $t3, coin_position
+	lw $t4, 0($t3)         # coin row
+	lw $t5, 4($t3)         # coin col
+
+	li $t6, 3
+	add $t7, $t4, $t6     # $t7 = coin_row + 3
+	blt $t1, $t4, end_coin_check
+	bge $t1, $t7, end_coin_check
+
+	# Check if doodle col is within coin area (3x3)
+	add $t7, $t5, $t6      # right edge
+	blt $t2, $t5, end_coin_check   # if doodle col < coin left
+	bge $t2, $t7, end_coin_check   # if doodle col >= coin right
+
+	#### PICKUP LOGIC ####
+	jal clear_coin       # erase the coin
+	jal update_score_no_scroll     # score++
+
+	# Generate new random row (0–50)
+	li $v0, 42
+	li $a1, 50
+	syscall
+	la $t8, coin_position
+	sw $a0, 0($t8)           # update coin row
+	la $t9, coin_base_row
+	sw $a0, 0($t9)           # update coin base row
+
+	# Generate new random col (1–60)
+	li $v0, 42
+	li $a1, 60
+	syscall
+	addi $a0, $a0, 1
+	sw $a0, 4($t8)           # update coin col
+
+	jal draw_coin
+
+end_coin_check:
+	lw $ra, 0($sp)
+	addi $sp, $sp, 4
+	jr $ra
+
+update_score_no_scroll:
+	# Load base address of score array
+	la $t2, score
+
+	# Load current digits
+	lw $t3, 0($t2)    # ones
+	lw $t4, 4($t2)    # tens
+	lw $t5, 8($t2)    # hundreds
+	lw $t6, 12($t2)   # thousands
+
+	# Increment
+	addi $t3, $t3, 1
+	li $t7, 10
+
+	blt $t3, $t7, store_score_ns
+
+	li $t3, 0
+	addi $t4, $t4, 1
+	blt $t4, $t7, store_score_ns
+
+	li $t4, 0
+	addi $t5, $t5, 1
+	blt $t5, $t7, store_score_ns
+
+	li $t5, 0
+	addi $t6, $t6, 1
+	blt $t6, $t7, store_score_ns
+
+	li $t6, 9        # max out at 9999
+
+store_score_ns:
+	sw $t3, 0($t2)
+	sw $t4, 4($t2)
+	sw $t5, 8($t2)
+	sw $t6, 12($t2)
+
+	jr $ra
+
+animate_coin:
+	# Load and increment counter
+	la $t6, coin_animation_counter
+	lw $t7, 0($t6)
+	addi $t7, $t7, 1
+	sw $t7, 0($t6)
+
+	 # Compare to threshold
+	la $t8, coin_animation_threshold
+	lw $t9, 0($t8)
+	blt $t7, $t9, skip_coin_anim
+
+	# Reset counter if threshold reached
+	li $t7, 0
+	sw $t7, 0($t6)
+	# Load current coin row and base row
+	la $t0, coin_position
+	lw $t1, 0($t0)            # current coin row
+	lw $t2, 4($t0)            # coin col
+
+	la $t3, coin_base_row
+	lw $t4, 0($t3)            # base row
+
+
+	addi $sp, $sp, -24
+	sw $t0, 0($sp)
+	sw $t1, 4($sp)
+	sw $t2, 8($sp)
+	sw $t3, 12($sp)
+	 sw $t4, 16($sp)
+	sw $ra, 20($sp)
+	# Clear current coin
+	jal clear_coin
+
+	lw $t0, 0($sp)
+	lw $t1, 4($sp)
+	lw $t2, 8($sp)
+	lw $t3, 12($sp)
+	lw $t4, 16($sp)
+	lw $ra, 20($sp)
+	addi $sp, $sp, 24
+	# Toggle: if current row == base row → move up, else → move back to base
+	beq $t1, $t4, move_up
+
+move_down:
+    sw $t4, 0($t0)            # move coin to base row
+    j draw_coin
+
+move_up:
+    subi $t5, $t4, 1
+    sw $t5, 0($t0)            # move coin up by 1
+    j draw_coin
+    
+    
+skip_coin_anim:
+    jr $ra
+
+spawn_coin_above_platform:
+	addi $sp, $sp, -4
+	sw   $ra, 0($sp)
+
+	li $v0, 42            # syscall: random int
+	li $a1, 4             # range: [0, 3] for 4 platforms
+	syscall
+	move $t0, $a0         # $t0 = random platform index
+
+	# Compute platform address
+	li $t1, 16          # size of each platform = 4 words = 16 bytes
+	la $t2, platforms
+	mul $t3, $t0, $t1
+	add $t4, $t2, $t3    # t4 = &platform[i]
+
+	lw $t5, 0($t4)      # platform row
+	lw $t6, 4($t4)      # platform col
+
+	# Coin row = platform_row - 2
+	subi $t5, $t5, 4
+
+	# Coin col = platform_col + 7 (roughly centered for 16-wide platform)
+	addi $t6, $t6, 7
+
+	# Write to coin_position
+	la   $t7, coin_position
+	sw   $t5, 0($t7)     # store row
+	sw   $t6, 4($t7)     # store col
+	la   $t7, coin_base_row
+	sw   $t5, 0($t7)     # store base row
 	
+	jal draw_coin
+
+	lw   $ra, 0($sp)
+	addi $sp, $sp, 4
+	jr   $ra
+			
 
 maybe_scroll_camera:
 	addi $sp, $sp, -4
@@ -150,18 +342,35 @@ maybe_scroll_camera:
 	# Move doodle down
 	jal clear_doodle
 	la $t0, doodle_position
-	 lw $t1, 0($t0)
+	lw $t1, 0($t0)
 	addi $t1, $t1, 1
 	sw $t1, 0($t0)
 	lw $t2, doodle_colour
 	jal draw_character_doodle
+	
+	# Move coin down
+	jal clear_coin
+	la $t0, coin_position
+	la $t2, coin_base_row
+	lw $t1, 0($t2)        # coin row
+	addi $t1, $t1, 1
+	sw $t1, 0($t0)        # update row
+	sw $t1, 0($t2)
+	
+	li $t3, 64
+	bge $t1, $t3, respawn_coin
 
+	jal draw_coin
 	# Setup platform loop
 	la $t3, platforms         # base address
 	lw $t4, num_platforms     # number of platforms
 	li $t5, 0                 # index counter
 
+
+
+
 scroll_loop:
+
 	bge $t5, $t4, done_scroll
 
 	li $t6, 16
@@ -220,6 +429,60 @@ done_scroll:
 	lw $ra, 0($sp)
 	addi $sp, $sp, 4
 	jr $ra
+	
+respawn_coin:
+	# Generate random column (1–60)
+	li $v0, 42
+	li $a1, 60
+	syscall
+	addi $a0, $a0, 1             # ensure 1–61 range
+	   la $t0, coin_position
+	sw $a0, 4($t0)               # store col
+
+	# Generate random row (0–50)
+	li $v0, 42
+	li $a1, 50
+	syscall
+	sw $a0, 0($t0)               # store new row
+	la $t2, coin_base_row
+	sw $a0, 0($t2)               # update base row
+
+	jal draw_coin
+	
+	addi $t5, $t5, 1
+	j scroll_loop
+    
+clear_coin:
+	lw $t0, background          # background color
+	la $t1, coin_position
+	lw $t2, 0($t1)              # coin row
+	lw $t3, 4($t1)              # coin col
+
+	li $t4, 0                   # row offset
+clear_coin_row:
+	bge $t4, 3, clear_coin_done
+	li $t5, 0                   # col offset
+clear_coin_col:
+	bge $t5, 3, clear_next_row
+
+	# Calculate pixel address
+	add $t6, $t2, $t4           # row = base + offset
+	add $t7, $t3, $t5           # col = base + offset
+	mul $t8, $t6, 64
+	add $t8, $t8, $t7
+	sll $t8, $t8, 2             # byte offset = row * 64 + col, then * 4
+	add $t8, $t8, $s0           # add base address
+
+	sw $t0, 0($t8)              # write background color
+
+	addi $t5, $t5, 1
+	j clear_coin_col
+clear_next_row:
+	addi $t4, $t4, 1
+	j clear_coin_row
+clear_coin_done:
+	jr $ra
+
 
 clear_score:
 	addi $sp, $sp, -4
@@ -539,31 +802,31 @@ draw_seven:
 	sw $a0, 4($t8)
 	sw $a0, 8($t8)
 
-    # Row 1: right side
-    li $t1, 1
-    mul $t2, $t1, $t9
-    add $t8, $a1, $t2
-    sw $a0, 8($t8)
+	# Row 1: right side
+	li $t1, 1
+	mul $t2, $t1, $t9
+	add $t8, $a1, $t2
+	sw $a0, 8($t8)
 
-    # Row 2: right side
-    li $t1, 2
-    mul $t2, $t1, $t9
-    add $t8, $a1, $t2
-    sw $a0, 8($t8)
+	# Row 2: right side
+	li $t1, 2
+	mul $t2, $t1, $t9
+	add $t8, $a1, $t2
+	sw $a0, 8($t8)
 
-    # Row 3: right side
-    li $t1, 3
-    mul $t2, $t1, $t9
-    add $t8, $a1, $t2
-    sw $a0, 8($t8)
+	# Row 3: right side
+	li $t1, 3
+	mul $t2, $t1, $t9
+	add $t8, $a1, $t2
+	sw $a0, 8($t8)
 
-    # Row 4: right side
-    li $t1, 4
-    mul $t2, $t1, $t9
-    add $t8, $a1, $t2
-    sw $a0, 8($t8)
+	# Row 4: right side
+	li $t1, 4
+	mul $t2, $t1, $t9
+	add $t8, $a1, $t2
+	sw $a0, 8($t8)
 
-    jr $ra
+	jr $ra
 draw_eight:
 	li $t9, 256
 	move $t8, $a1
@@ -825,8 +1088,13 @@ handle_input:
 	
 handle_restart:
 	jal randomise_platforms
+	jal spawn_coin_above_platform
 	li $t0, 0
-	sw $t0, score
+	la $t1, score
+	sw $t0, 0($t1)     # ones
+	sw $t0, 4($t1)     # tens
+	sw $t0, 8($t1)     # hundreds
+	sw $t0, 12($t1)    # thousands
 	sw $t0, gravity_counter
 	sw $t0, jump_counter
 	sw $t0, last_platform_index
@@ -835,6 +1103,19 @@ handle_restart:
 	j game_loop
 
 handle_quit:
+	lw $t0, font_colour          # Load background color into $t0
+	lw $t1, display_dimension
+	mul $t2, $t1, $t1           # total_pixels = 32 * 32
+	li $t3, 0                   # index = 0
+	jal fill_loop
+	li $t2, 8        # row
+	li $t3, 4       # col
+	mul $t4, $t2, 256
+	mul $t5, $t3, 4
+	add $t6, $t1, $t4
+	add $t6, $t6, $t5   # $t6 = base pixel of 'R'
+	add $t6, $t6, $s0
+	lw $t7, white_colour	
 	li $v0, 10     # syscall to exit program
 	syscall
 
@@ -877,7 +1158,7 @@ save_doodle_pos:
 	sw $t2, 4($t0)
 	jr $ra
                 
-# Draw coin object (4 pixels)
+# Draw coin object (9 pixels)
 draw_coin:
 	lw $t0, coin_colour
 	lw $t9, coin_colour_center
@@ -893,7 +1174,7 @@ coin_col_loop:
 	bge $t5, 3, coin_next_row
 	add $t6, $t2, $t4   # row
 	add $t7, $t3, $t5   # col
-	mul $t8, $t6, 32
+	mul $t8, $t6, 64
 	add $t8, $t8, $t7
 	sll $t8, $t8, 2
 	add $t8, $t8, $s0
@@ -1087,8 +1368,6 @@ draw_pixel:
 		#draw_background()
 		#draw_platform()	
 draw_bg_and_plat:
-	la  $s0, base_address   # Load the address of base_address
-	lw  $s0, 0($s0)         # Load the actual value (0x10008000) into $s0
 	addi $sp, $sp, -4
 	sw   $ra, 0($sp)
 	jal draw_background	    # background is now drawn
@@ -1099,8 +1378,6 @@ draw_bg_and_plat:
 draw_platforms:
 	addi $sp, $sp, -4
 	sw   $ra, 0($sp)
-	la  $s0, base_address   # Load the address of base_address
-	lw  $s0, 0($s0)         # Load the actual value (0x10008000) into $s0
 	la $t0, platforms         # base of platform array
 	lw $t1, num_platforms     # total number of platforms
 	li $t2, 0                 # platform index
@@ -1150,8 +1427,6 @@ one_drawing:
 	jr $ra
 	
 draw_background:
-	la  $s0, base_address   # Load the address of base_address
-	lw  $s0, 0($s0)         # Load the actual value (0x10008000) into $s0
 	lw $t0, background          # Load background color into $t0
 	lw $t1, display_dimension
 	mul $t2, $t1, $t1           # total_pixels = 32 * 32
@@ -1169,6 +1444,360 @@ done_fill:
 	jr $ra                       # return
 	
 
-end_game:
+quit_game:
 	li $v0, 10
 	syscall     
+	
+end_game:
+	addi $sp, $sp, -4
+	sw $ra, 0($sp)
+	lw $t0, font_colour          # Load black color into $t0
+	lw $t1, display_dimension
+	mul $t2, $t1, $t1           # total_pixels = 32 * 32
+	li $t3, 0                   # index = 0
+	jal fill_loop
+	li $t2, 8        # row
+	li $t3, 4       # col
+	mul $t4, $t2, 256
+	mul $t5, $t3, 4
+	add $t6, $t1, $t4
+	add $t6, $t6, $t5   # $t6 = base pixel of 'R'
+	add $t6, $t6, $s0
+	lw $t7, white_colour	
+	
+	jal draw_RESET
+	jal draw_WITH
+
+wait_for_restart:
+	li $v0, 32           # Sleep for 30ms to prevent spamming
+	li $a0, 30
+	syscall
+
+	lw $t0, keypress     # Check if key is pressed
+	lw $t0, 0($t0)
+	beq $t0, 1, check_restart_key  # if key is pressed, check value
+
+	j wait_for_restart	
+    
+check_restart_key:
+	lw $t1, keyvalue     # Get key value
+	lw $t1, 0($t1)
+	li $t2, 0x72         # ASCII for 'r'
+	beq $t1, $t2, handle_restart
+
+	j wait_for_restart 
+	
+draw_RESET:
+	addi $sp, $sp, -4
+	sw $ra, 0($sp)
+	# Draw R
+	move $t8, $t6
+	jal draw_R
+
+	# Draw E
+	addi $t8, $t6, 24
+	jal draw_E
+
+	# Draw S
+	 addi $t8, $t6, 48
+	jal draw_S
+
+	# Draw E
+	 addi $t8, $t6, 72
+	jal draw_E
+
+	# Draw T
+	 addi $t8, $t6, 96
+	jal draw_T
+	 lw $ra, 0($sp)
+	addi $sp, $sp, 4
+	jr $ra
+
+draw_R:
+	# Row 0
+	sw $t7, 0($t8)
+	sw $t7, 4($t8)
+	sw $t7, 8($t8)
+	sw $t7, 12($t8)
+	sw $t7, 16($t8)
+
+	# Row 1
+	add $t8, $t8, $t9
+	sw $t7, 0($t8)
+	sw $t7, 16($t8)
+
+	# Row 2
+	add $t8, $t8, $t9
+	 sw $t7, 0($t8)
+	sw $t7, 16($t8)
+
+	# Row 3
+	add $t8, $t8, $t9
+	sw $t7, 0($t8)
+	sw $t7, 4($t8)
+	sw $t7, 8($t8)
+	sw $t7, 12($t8)
+	
+	# Row 4	
+	add $t8, $t8, $t9
+	sw $t7, 0($t8)
+	sw $t7, 8($t8)
+
+	# Row 5: X  X
+	   add $t8, $t8, $t9
+	sw $t7, 0($t8)
+	sw $t7, 12($t8)
+
+    	# Row 6: X   X
+	add $t8, $t8, $t9
+	sw $t7, 0($t8)
+	sw $t7, 16($t8)
+
+	jr $ra
+
+draw_E:
+	# Row 0	
+	sw $t7, 0($t8)
+	sw $t7, 4($t8)
+	sw $t7, 8($t8)
+	sw $t7, 12($t8)
+	sw $t7, 16($t8)
+
+	# Row 1	
+	   add $t8, $t8, $t9
+	sw $t7, 0($t8)
+
+	# Row 2	
+	  add $t8, $t8, $t9
+	sw $t7, 0($t8)
+
+	# Row 3	
+	add $t8, $t8, $t9
+	sw $t7, 0($t8)
+	sw $t7, 4($t8)
+	sw $t7, 8($t8)
+	sw $t7, 12($t8)
+	sw $t7, 16($t8)
+
+	# Row 4	
+	add $t8, $t8, $t9
+	sw $t7, 0($t8)
+
+	# Row 5	
+	add $t8, $t8, $t9
+	sw $t7, 0($t8)
+
+	# Row 6	
+	add $t8, $t8, $t9
+	sw $t7, 0($t8)
+	sw $t7, 4($t8)
+	sw $t7, 8($t8)
+	sw $t7, 12($t8)
+	sw $t7, 16($t8)
+
+	jr $ra
+    
+draw_S:
+	# Row 0	
+	sw $t7, 0($t8)
+	sw $t7, 4($t8)
+	sw $t7, 8($t8)
+	  sw $t7, 12($t8)
+	sw $t7, 16($t8)
+
+	# Row 1	
+	add $t8, $t8, $t9
+	sw $t7, 0($t8)
+
+	# Row 2	
+	 add $t8, $t8, $t9
+	  sw $t7, 0($t8)
+
+	# Row 3	
+	add $t8, $t8, $t9
+	sw $t7, 0($t8)
+	sw $t7, 4($t8)
+	sw $t7, 8($t8)
+	sw $t7, 12($t8)
+	sw $t7, 16($t8)
+
+	# Row 4	
+	add $t8, $t8, $t9
+	sw $t7, 16($t8)
+
+	# Row 5	
+	add $t8, $t8, $t9
+	sw $t7, 16($t8)
+
+	# Row 6	
+	add $t8, $t8, $t9
+	sw $t7, 0($t8)
+	sw $t7, 4($t8)
+	sw $t7, 8($t8)
+	sw $t7, 12($t8)
+	sw $t7, 16($t8)
+
+	jr $ra
+
+draw_T:
+	# Row 0	
+	sw $t7, 0($t8)
+	sw $t7, 4($t8)
+	sw $t7, 8($t8)
+	sw $t7, 12($t8)
+	sw $t7, 16($t8)
+
+	# Row 1–6	
+	li $t1, 1
+	
+draw_T_loop:
+	bgt $t1, 6, done_draw_T
+	add $t8, $t8, $t9
+	sw $t7, 8($t8)     # middle column (3rd pixel)
+	addi $t1, $t1, 1
+	j draw_T_loop
+
+done_draw_T:
+	jr $ra
+    
+    
+draw_WITH:
+	addi $sp, $sp, -4
+	sw $ra, 0($sp)
+	# Move to next line for 'WITH'
+	li $t9, 256         # row stride
+	li $t8, 8           # move down 8 rows
+	mul $t8, $t8, $t9
+	add $t6, $t6, $t8   # move base to row + 8
+
+	# Draw W
+	move $t8, $t6
+	jal draw_W
+
+	# Draw I
+	addi $t8, $t6, 24
+	jal draw_I
+
+	# Draw T
+	addi $t8, $t6, 48
+	jal draw_T
+
+	# Draw H
+	addi $t8, $t6, 72
+	jal draw_H
+
+	# Move to another line for 'R'
+	li $t8, 256
+	mul $t8, $t8, 8
+	add $t6, $t6, $t8     # move base to row + 16
+
+	move $t8, $t6
+	jal draw_R
+	lw $ra, 0($sp)
+	addi $sp, $sp, 4
+
+	jr $ra
+    
+    
+draw_W:
+	li $t9, 256        # row stride
+	move $t1, $t8      # base address
+
+	# Row 0
+	sw $t7, 0($t1)
+	sw $t7, 16($t1)
+
+	# Row 1
+	add $t1, $t1, $t9
+	sw $t7, 0($t1)
+	sw $t7, 16($t1)
+
+	# Row 2
+	add $t1, $t1, $t9
+	sw $t7, 0($t1)
+	sw $t7, 8($t1)
+	sw $t7, 16($t1)
+
+	# Row 3
+	add $t1, $t1, $t9
+	sw $t7, 0($t1)
+	sw $t7, 8($t1)
+	sw $t7, 16($t1)
+
+	# Row 4
+	add $t1, $t1, $t9
+	sw $t7, 0($t1)
+	sw $t7, 8($t1)
+	sw $t7, 16($t1)
+
+	# Row 5
+	add $t1, $t1, $t9
+	sw $t7, 0($t1)
+	sw $t7, 16($t1)
+
+	# Row 6
+	add $t1, $t1, $t9
+	sw $t7, 8($t1)
+
+	jr $ra
+    
+draw_I:
+	li $t9, 256
+	  move $t1, $t8
+
+	# Top bar
+	sw $t7, 0($t1)
+	sw $t7, 4($t1)
+	sw $t7, 8($t1)
+
+	# Rows 1–5: center column
+	li $t2, 0
+draw_I_loop:
+	beq $t2, 5, draw_I_bottom
+	add $t1, $t1, $t9
+	sw $t7, 4($t1)
+	addi $t2, $t2, 1
+	j draw_I_loop
+
+draw_I_bottom:
+	add $t1, $t1, $t9
+	sw $t7, 0($t1)
+	sw $t7, 4($t1)
+	sw $t7, 8($t1)
+	jr $ra    
+    
+    
+draw_H:
+	li $t9, 256
+	move $t1, $t8
+
+	# Rows 0–6
+	li $t2, 0
+draw_H_loop:
+	beq $t2, 3, draw_H_middle
+	sw $t7, 0($t1)
+	sw $t7, 16($t1)
+	add $t1, $t1, $t9
+	addi $t2, $t2, 1
+	j draw_H_loop
+
+draw_H_middle:
+	sw $t7, 0($t1)
+	sw $t7, 4($t1)
+	sw $t7, 8($t1)
+	sw $t7, 12($t1)
+	sw $t7, 16($t1)
+	add $t1, $t1, $t9
+	addi $t2, $t2, 1
+
+    # Remaining rows
+draw_H_rest:
+	bge $t2, 7, done_H
+	sw $t7, 0($t1)
+	sw $t7, 16($t1)
+	add $t1, $t1, $t9
+	addi $t2, $t2, 1
+	j draw_H_rest
+
+done_H:
+	jr $ra
