@@ -43,6 +43,7 @@ platform_width:      .word 16          # width of a platform
 frame_time:     .word 40 
 doodle_colour:       .word 0x32A852
 platform_colour:     .word 0x00ff00
+moving_platform_colour: .word 0x0000FF
 num_platforms: .word 4
 platforms:
     # Platform 0
@@ -74,7 +75,7 @@ doodle_position: .space 8		# row col
 coin_colour:         .word 0xFFFF00     # yellow coin
 enemy_colour:        .word 0xAA00FF     # purple enemy
 coin_colour_center:  .word 0xCCAA00     # darker gold for center
-coin_position:    .word 18, 14   # row, col for coin
+coin_position:    .word 0, 0   # row, col for coin
 enemy_position:   .word 26, 20   # row, col for enemy
 keypress: .word 0xffff0000
 keyvalue: .word 0xffff0004
@@ -93,9 +94,24 @@ digit_positions:
     .word 0x10008134   # thousands at col 45
     
 scroll_counter: .word 0
-coin_base_row:            .word 0           # original base row (set at spawn)
+coin_base_row:            .word 0           # original base row 
 coin_animation_counter:   .word 0
 coin_animation_threshold: .word 20
+
+slow_position:    .word 18, 14   # row, col for coin
+slow_base_row:            .word 0           # original base row 
+slow_timer:               .word 0
+slow_duration: 		  .word 300        # frames to slow for 
+slow_active:              .word 1
+slow_animation_counter:   .word 0
+slow_animation_threshold: .word 20
+slow_colour:              .word 0xA9A9A9
+slow_hand_colour:         .word 0xFF0000
+slow_flash_counter: .word 0
+flash_interval:     .word 8          # frames between flashes
+doodle_flash_colour: .word 0xFFFFFF  # white
+move_plat_counter:   .word 0
+move_plat_threshold: .word 4    # update every 4 frames
 
 
 .globl main
@@ -109,6 +125,7 @@ main:
         jal draw_bg_and_plat
 	jal init_draw_doodle
 	jal spawn_coin_above_platform
+	jal spawn_slow_pickup
 #	li $t0, 16        # row
 #	li $t1, 31        # col (safe, no wrapping)
 #	la $t2, doodle_position
@@ -119,7 +136,6 @@ game_loop:
 	jal clear_doodle
 	jal read_input
 	jal clear_score
-
 	#Gravity timing logic
 	la $s7, gravity_counter
 	lw $s6, 0($s7)
@@ -129,19 +145,475 @@ game_loop:
 	blt $s6, $t3, skip_gravity
 
 	li $t1, 0            # Reset counter
+
 	jal apply_gravity
 	
 skip_gravity:
 	sw $s6, 0($s7)       # Update counter
 	jal maybe_scroll_camera
 	jal check_coin_pickup
+	jal check_slow_pickup
 	jal draw_platforms
-	lw $t2, doodle_colour
+	la $t0, move_plat_counter
+	lw $t1, 0($t0)
+	addi $t1, $t1, 1
+	sw $t1, 0($t0)
+
+	la $t2, move_plat_threshold
+	lw $t3, 0($t2)
+	blt $t1, $t3, skip_move_platforms
+
+	li $t1, 0
+	sw $t1, 0($t0)
+	jal update_moving_platforms
+
+skip_move_platforms:
+	jal get_doodle_colour
+	move $t2, $v0     
 	jal draw_character_doodle
 	jal draw_score
 	jal animate_coin
+	jal animate_slow
 	jal delay_frame
 	j game_loop
+
+update_moving_platforms:
+	addi $sp, $sp, -4
+	sw   $ra, 0($sp)
+	la  $t0, platforms          # base address
+	lw  $t1, num_platforms      # total platforms
+	li  $t2, 0                  # index
+	li  $t3, 16                 # bytes per platform
+	
+
+move_loop:
+	li   $t3, 16
+	bge $t2, $t1, done_update
+
+	# compute platform[i] address
+	mul  $t4, $t2, $t3
+	add  $t5, $t0, $t4          # $t5 = &platform[i]
+
+	lw  $t6, 8($t5)             # type
+	li  $t7, 1
+	bne $t6, $t7, next_plats     # skip if not moving
+
+	# Only clear if moving
+	jal clear_platform
+
+	lw  $t8, 4($t5)             # current col
+	lw  $t9, 12($t5)            # direction (0 = left, 1 = right)
+
+    # direction logic
+	beqz $t9, go_left           # if dir == 0, go left
+	addi $t8, $t8, 1            # move right
+	li   $t3, 48                # max col = 64 - 16
+	bgt  $t8, $t3, flip_to_left
+	j update_col
+
+go_left:
+	addi $t8, $t8, -1           # move left
+	bltz $t8, flip_to_right
+	j update_col
+
+update_col:
+	sw $t8, 4($t5)              # store new col
+	j next_plats
+
+flip_to_right:
+	li $t9, 1
+	sw $t9, 12($t5)
+	li $t8, 0                   # reset col to safe left
+	sw $t8, 4($t5)
+	j next_plats
+
+flip_to_left:
+	li $t9, 0
+	sw $t9, 12($t5)
+	li $t8, 48                  # reset col to max safe col
+	sw $t8, 4($t5)
+	j next_plats
+
+next_plats:
+	addi $t2, $t2, 1
+	j move_loop
+
+done_update:
+	lw $ra, 0($sp)
+	addi $sp, $sp, 4
+	jr $ra
+	
+
+clear_platform:
+	addi $sp, $sp, -4
+	sw $ra, 0($sp)
+	addi $sp, $sp, -20
+	sw   $ra, 0($sp)
+	sw   $t0, 4($sp)
+	sw   $t1, 8($sp)
+	sw   $t2, 12($sp)
+	sw   $t9, 16($sp)
+	lw $t0, 0($t5)        # row
+	lw $t1, 4($t5)        # col
+	lw $t7, background    # color = background (clear)
+
+	mul $t2, $t0, 64      # row * 64
+	add $t2, $t2, $t1     # + col
+	sll $t2, $t2, 2       # * 4
+	add $t9, $t2, $s0     # final pixel address
+
+	li $t6, 0             # reset draw counter
+	jal draw_line
+	lw   $ra, 0($sp)
+	lw   $t0, 4($sp)
+	lw   $t1, 8($sp)
+	lw   $t2, 12($sp)
+	lw   $t9, 16($sp)
+	addi $sp, $sp, 20
+	lw $ra, 0($sp)
+	addi $sp, $sp, 4
+	jr $ra
+
+get_doodle_colour:
+	la  $t0, slow_timer
+	lw  $t1, 0($t0)
+	beqz $t1, use_normal_colour   # No slow effect
+
+	# Increment flash counter
+	la  $t2, slow_flash_counter
+	lw  $t3, 0($t2)
+	addi $t3, $t3, 1
+	sw   $t3, 0($t2)
+
+	# Check flash toggle (flash_interval)
+	la  $t4, flash_interval
+	lw  $t5, 0($t4)
+	div  $t3, $t5
+	mfhi $t6
+	bnez $t6, use_normal_colour
+
+use_flash_colour:
+	la  $t7, doodle_flash_colour
+	lw  $v0, 0($t7)   # Return flash color
+	jr  $ra
+
+use_normal_colour:
+	la  $t7, doodle_colour
+	lw  $v0, 0($t7)   # Return normal color
+	jr  $ra
+
+
+check_slow_pickup:
+	addi $sp, $sp, -4
+	sw   $ra, 0($sp)
+
+	la  $t0, slow_active
+	lw  $t1, 0($t0)
+	beqz $t1, end_check_slow   # skip if not active
+
+	# Load doodle position
+	la  $t2, doodle_position
+	lw  $t3, 0($t2)    # doodle row
+	lw  $t4, 4($t2)    # doodle col
+
+	# Load slow position
+	la  $t5, slow_position
+	lw  $t6, 0($t5)    # slow row
+	lw  $t7, 4($t5)    # slow col
+
+	# Check row range (within slow_row ~ slow_row+4)
+	li  $t8, 5
+	add $t9, $t6, $t8
+	blt $t3, $t6, end_check_slow
+	bge $t3, $t9, end_check_slow
+
+	# Check col range (within slow_col ~ slow_col+4)
+	add $t9, $t7, $t8
+	blt $t4, $t7, end_check_slow
+	bge $t4, $t9, end_check_slow
+
+	# COLLISION DETECTED
+	jal clear_slow
+
+	# Set slow_timer
+	la  $t0, slow_timer
+	la  $t1, slow_duration
+	lw  $t2, 0($t1)
+	sw  $t2, 0($t0)
+
+	# Deactivate slow
+	la  $t3, slow_active
+	sw  $zero, 0($t3)
+
+end_check_slow:
+	lw  $ra, 0($sp)
+	addi $sp, $sp, 4
+	jr  $ra
+
+
+animate_slow:
+	addi $sp, $sp, -4
+	sw   $ra, 0($sp)
+
+	# Load and increment counter
+	la $t0, slow_animation_counter
+	lw $t1, 0($t0)
+	addi $t1, $t1, 1
+	sw $t1, 0($t0)
+
+	# Compare to threshold
+	la $t2, slow_animation_threshold
+	lw $t3, 0($t2)
+	blt $t1, $t3, done_animate_slow
+
+	# Reset counter
+	li $t1, 0
+	sw $t1, 0($t0)
+
+	# Load current and base position
+	la $t4, slow_position
+	lw $t5, 0($t4)   # current row
+	lw $t6, 4($t4)   # col
+
+	la $t7, slow_base_row
+	lw $t8, 0($t7)   # base row
+	sw   $ra, 0($sp)
+	sw   $t4, 4($sp)      # slow_position addr
+	sw   $t7, 8($sp)      # slow_base_row addr
+	sw   $t5, 12($sp)     # current row
+	sw   $t8, 16($sp)     # base row
+	# Erase current
+	jal clear_slow
+	lw   $ra, 0($sp)
+	lw   $t4, 4($sp)
+	lw   $t7, 8($sp)
+	lw   $t5, 12($sp)
+	lw   $t8, 16($sp)
+	# Toggle: if at base → move up, else → move to base
+	beq $t5, $t8, move_slow_up
+
+move_slow_down:
+	sw $t8, 0($t4)   # reset to base row
+	j done_animate_slow
+
+move_slow_up:
+	 subi $t9, $t8, 1
+	sw $t9, 0($t4)   # move up by 1
+	j done_animate_slow
+
+done_animate_slow:
+	jal draw_slow_pickup
+	lw   $ra, 0($sp)
+	addi $sp, $sp, 4
+	jr $ra
+
+clear_slow:
+	lw  $t0, background        # background color
+	la  $t1, slow_position
+	lw  $t2, 0($t1)            # base row
+	lw  $t3, 4($t1)            # base col
+
+	li  $t4, 0                 # row offset
+
+clear_slow_row:
+	bge $t4, 5, clear_slow_done
+	li  $t5, 0                 # col offset
+
+clear_slow_col:
+	 bge $t5, 5, next_slow_row
+
+	# Calculate (row + offset, col + offset)
+	add $t6, $t2, $t4
+	 add $t7, $t3, $t5
+
+	# Convert to pixel address
+	mul $t8, $t6, 64
+	add $t8, $t8, $t7
+	sll $t8, $t8, 2
+	add $t8, $t8, $s0
+
+	sw  $t0, 0($t8)            # overwrite with background
+
+	addi $t5, $t5, 1
+	j clear_slow_col
+
+next_slow_row:
+	addi $t4, $t4, 1
+	j clear_slow_row
+
+clear_slow_done:
+	jr $ra
+
+
+spawn_slow_pickup:
+	addi $sp, $sp, -4
+	sw   $ra, 0($sp)
+
+	# Generate random row (0–50)
+	li $v0, 42           # syscall: random int
+	li $a1, 50
+	syscall
+	move $t0, $a0        # random row
+
+	la   $t1, slow_position
+	sw   $t0, 0($t1)     # store row
+
+	la   $t2, slow_base_row
+	sw   $t0, 0($t2)     # also save as base row
+
+	# Generate random col (1–60)
+	li $v0, 42
+	li $a1, 60
+	syscall
+	addi $a0, $a0, 1     # range 1–60
+	sw   $a0, 4($t1)     # store col
+
+	lw   $ra, 0($sp)
+	addi $sp, $sp, 4
+	jr   $ra
+
+
+draw_slow_pickup:
+	la   $t0, slow_active
+	lw   $t1, 0($t0)
+	beqz $t1, done_draw_slow
+
+	la   $t0, slow_position
+	lw   $t1, 0($t0)     # base row
+	lw   $t2, 4($t0)     # base col
+
+	lw   $t5, slow_colour         # G = gray (minute hand)
+	lw   $t6, slow_hand_colour    # R = red (hour hand)
+	lw   $t7, white_colour        # W = white
+
+	# (R+0, C+1) - white
+	addi $t3, $t1, 0
+	addi $t4, $t2, 1
+	mul  $t8, $t3, 64
+	add  $t8, $t8, $t4
+	sll  $t8, $t8, 2
+	add  $t8, $t8, $s0
+	sw   $t7, 0($t8)
+
+	# (R+0, C+2) - gray
+	addi $t4, $t2, 2
+	mul  $t8, $t3, 64
+	add  $t8, $t8, $t4
+	sll  $t8, $t8, 2
+	add  $t8, $t8, $s0
+	sw   $t5, 0($t8)
+
+	# (R+0, C+3) - white
+	addi $t4, $t2, 3
+	mul  $t8, $t3, 64
+	add  $t8, $t8, $t4
+	sll  $t8, $t8, 2
+	add  $t8, $t8, $s0
+	sw   $t7, 0($t8)
+
+	# (R+1, C+0) - white
+	addi $t3, $t1, 1
+	addi $t4, $t2, 0
+	mul  $t8, $t3, 64
+	add  $t8, $t8, $t4
+	sll  $t8, $t8, 2
+	add  $t8, $t8, $s0
+	sw   $t7, 0($t8)
+
+	# (R+1, C+2) - gray
+	addi $t4, $t2, 2
+	mul  $t8, $t3, 64
+	add  $t8, $t8, $t4
+	sll  $t8, $t8, 2
+	add  $t8, $t8, $s0
+	sw   $t5, 0($t8)
+
+	# (R+1, C+4) - white
+	addi $t4, $t2, 4
+	mul  $t8, $t3, 64
+	add  $t8, $t8, $t4
+	sll  $t8, $t8, 2
+	add  $t8, $t8, $s0
+	sw   $t7, 0($t8)
+
+	# (R+2, C+0) - white
+	addi $t3, $t1, 2
+	addi $t4, $t2, 0
+	mul  $t8, $t3, 64
+	add  $t8, $t8, $t4
+	sll  $t8, $t8, 2
+	add  $t8, $t8, $s0
+	sw   $t7, 0($t8)
+
+	# (R+2, C+2) - gray
+	addi $t4, $t2, 2
+	mul  $t8, $t3, 64
+	add  $t8, $t8, $t4
+	sll  $t8, $t8, 2
+	add  $t8, $t8, $s0
+	sw   $t5, 0($t8)
+
+	# (R+2, C+4) - white
+	addi $t4, $t2, 4
+	mul  $t8, $t3, 64
+	add  $t8, $t8, $t4
+	sll  $t8, $t8, 2
+	add  $t8, $t8, $s0
+	sw   $t7, 0($t8)
+
+	# (R+3, C+0) - white
+	addi $t3, $t1, 3
+	addi $t4, $t2, 0
+	mul  $t8, $t3, 64
+	add  $t8, $t8, $t4
+	sll  $t8, $t8, 2
+	add  $t8, $t8, $s0
+	sw   $t7, 0($t8)
+
+	# (R+3, C+3) - red
+	addi $t4, $t2, 3
+	mul  $t8, $t3, 64
+	add  $t8, $t8, $t4
+	sll  $t8, $t8, 2
+	add  $t8, $t8, $s0
+	sw   $t6, 0($t8)
+
+	# (R+3, C+4) - white
+	addi $t4, $t2, 4
+	mul  $t8, $t3, 64
+	add  $t8, $t8, $t4
+	sll  $t8, $t8, 2
+	add  $t8, $t8, $s0
+	sw   $t7, 0($t8)
+
+	# (R+4, C+1) - white
+	addi $t3, $t1, 4
+	addi $t4, $t2, 1
+	mul  $t8, $t3, 64
+	add  $t8, $t8, $t4
+	sll  $t8, $t8, 2
+	add  $t8, $t8, $s0
+	sw   $t7, 0($t8)
+
+	# (R+4, C+2) - white
+	addi $t4, $t2, 2
+	mul  $t8, $t3, 64
+	add  $t8, $t8, $t4
+	sll  $t8, $t8, 2
+	add  $t8, $t8, $s0
+	sw   $t7, 0($t8)
+
+	# (R+4, C+3) - white
+	addi $t4, $t2, 3
+	mul  $t8, $t3, 64
+	add  $t8, $t8, $t4
+	sll  $t8, $t8, 2
+	add  $t8, $t8, $s0
+	sw   $t7, 0($t8)
+
+done_draw_slow:
+	jr $ra
+
 
 check_coin_pickup:
 	addi $sp, $sp, -4
@@ -359,18 +831,26 @@ maybe_scroll_camera:
 	
 	li $t3, 64
 	bge $t1, $t3, respawn_coin
-
 	jal draw_coin
+	
+	jal clear_slow
+	la $t0, slow_position
+	la $t2, slow_base_row
+	lw $t1, 0($t2)        # coin row
+	addi $t1, $t1, 1
+	sw $t1, 0($t0)        # update row
+	sw $t1, 0($t2)
+	
+	li $t3, 64
+	bge $t1, $t3, spawn_slow_pickup
+	jal draw_slow_pickup
+	
 	# Setup platform loop
 	la $t3, platforms         # base address
 	lw $t4, num_platforms     # number of platforms
 	li $t5, 0                 # index counter
 
-
-
-
 scroll_loop:
-
 	bge $t5, $t4, done_scroll
 
 	li $t6, 16
@@ -409,8 +889,20 @@ scroll_loop:
 	sw $a0, 4($t8)
 	move $s1, $a0
 
-	skip_respawn:
-	
+	li $v0, 42
+	li $a1, 2
+	syscall
+	sw $a0, 8($t8)         # store type
+
+	# If type == 1, generate direction
+	beqz $a0, skip_respawn
+
+	li $v0, 42
+	li $a1, 2
+	syscall
+	sw $a0, 12($t8)        # store direction (0 = left, 1 = right)
+
+skip_respawn:	
 	#### Draw new platform ####
 	lw $t7, platform_colour
 
@@ -898,33 +1390,62 @@ randomise_platforms:
 	li $t2, 6         # col
 	sw $t1, 0($t0)    # storage
 	sw $t2, 4($t0)   
-	#### Platform 1 ####	
-	
+	#### Platform 1 ####
 	li $t1, 47
-	sw $t1, 16($t0)   # row offset = 4 words = 16 bytes
-
-	li $v0, 42
-	li $a1, 48        # random col ∈ [0, 64 - 12]
-	syscall
-	sw $a0, 20($t0)   # col for platform 1   16 + 4
-	
-       #### Platform 2 ####
-	li $t1, 31
-	sw $t1, 32($t0)
+	sw $t1, 16($t0)    # row
 
 	li $v0, 42
 	li $a1, 48
 	syscall
-	sw $a0, 36($t0)   # 32 + 4
+	sw $a0, 20($t0)    # col
+
+	li $v0, 42
+	li $a1, 2
+	syscall
+	sw $a0, 24($t0)    # type (0 = static, 1 = moving)
+
+	li $v0, 42
+	li $a1, 2
+	syscall
+	sw $a0, 28($t0)    # direction (0 = left, 1 = right)
+
+	#### Platform 2 ####
+	li $t1, 31
+	sw $t1, 32($t0)    # row
+	
+	li $v0, 42
+	li $a1, 48
+	syscall
+	sw $a0, 36($t0)    # col
+
+	li $v0, 42
+	li $a1, 2
+	syscall
+	sw $a0, 40($t0)    # type
+
+	li $v0, 42
+	li $a1, 2
+	syscall
+	sw $a0, 44($t0)    # direction
 
 	#### Platform 3 ####
 	li $t1, 15
-	sw $t1, 48($t0)
+	sw $t1, 48($t0)    # row
 
-	li $v0, 42
+ 	li $v0, 42
 	li $a1, 48
 	syscall
-	sw $a0, 52($t0)  # 48 + 4
+	sw $a0, 52($t0)    # col
+
+	li $v0, 42
+	li $a1, 2
+	syscall
+	sw $a0, 56($t0)    # type
+
+	li $v0, 42
+	li $a1, 2
+	syscall
+	sw $a0, 60($t0)    # direction
 
 	jr $ra
     
@@ -1026,10 +1547,14 @@ store_score:
 	sw $t5, 8($t2)
 	sw $t6, 12($t2)
 
+	li $t7, 1
+	beq $t4, $t7, you_win
+	
     # Update last platform index
 	li $t0, 16
 	la $t1, scroll_counter
 	sw $t0, 0($t1)
+	
 
 end_update_score:
 	j done_gravity
@@ -1055,6 +1580,172 @@ done_gravity:
 	jr $ra                     # Return	
 	
 	
+you_win:
+	addi $sp, $sp, -4
+	sw $ra, 0($sp)
+	lw $t0, font_colour          # Load black color into $t0
+	lw $t1, display_dimension
+	mul $t2, $t1, $t1           # total_pixels = 32 * 32
+	li $t3, 0                   # index = 0
+	jal fill_loop
+	li $t2, 8        # row
+	li $t3, 4       # col
+	mul $t4, $t2, 256
+	mul $t5, $t3, 4
+	add $t6, $t1, $t4
+	add $t6, $t6, $t5   # $t6 = base pixel of 'R'
+	add $t6, $t6, $s0
+	lw $t7, white_colour	
+	
+	# Draw "YOU"
+	move $t8, $t6
+	jal draw_Y
+	addi $t8, $t6, 24
+	jal draw_O
+	addi $t8, $t6, 48
+	jal draw_U
+
+	# Move to next row for "WIN"
+	li $t9, 256
+	li $t0, 8
+	mul $t0, $t0, $t9
+	add $t6, $t6, $t0
+
+	move $t8, $t6
+	jal draw_W
+	addi $t8, $t6, 24
+	jal draw_I
+	addi $t8, $t6, 48
+	jal draw_N
+
+wait_restart_win:
+	li $v0, 32
+	li $a0, 30
+	syscall
+
+	lw $t0, keypress
+	lw $t0, 0($t0)
+	beq $t0, 1, check_win_restart
+	j wait_restart_win
+
+check_win_restart:
+	lw $t1, keyvalue
+	lw $t1, 0($t1)
+	li $t2, 0x72       # ASCII 'r'
+	beq $t1, $t2, handle_restart
+	j wait_restart_win
+
+	lw $ra, 0($sp)
+	addi $sp, $sp, 4
+	jr $ra
+	
+draw_Y:
+	li $t9, 256
+	move $t1, $t8
+
+	# Row 0
+	sw $t7, 0($t1)
+	sw $t7, 16($t1)
+
+	# Row 1
+	add $t1, $t1, $t9
+	sw $t7, 4($t1)
+	sw $t7, 12($t1)
+
+	# Row 2
+	add $t1, $t1, $t9
+	sw $t7, 8($t1)
+
+	# Row 3-6
+	add $t1, $t1, $t9
+	sw $t7, 8($t1)
+	add $t1, $t1, $t9
+	sw $t7, 8($t1)
+	add $t1, $t1, $t9
+	sw $t7, 8($t1)
+
+	jr $ra
+	
+draw_O:
+		li $t9, 256
+	move $t1, $t8
+
+	# Row 0 (Top)
+	sw $t7, 0($t1)
+	sw $t7, 4($t1)
+	sw $t7, 8($t1)
+	sw $t7, 12($t1)
+	sw $t7, 16($t1)
+
+	# Row 1–5: sides
+	li $t2, 1
+draw_O_loop:
+	bgt $t2, 5, draw_O_bottom
+	add $t1, $t1, $t9
+	sw $t7, 0($t1)
+	sw $t7, 16($t1)
+	addi $t2, $t2, 1
+	j draw_O_loop
+
+draw_O_bottom:
+	add $t1, $t1, $t9
+	sw $t7, 0($t1)
+	sw $t7, 4($t1)
+	sw $t7, 8($t1)
+	sw $t7, 12($t1)
+	sw $t7, 16($t1)
+
+	jr $ra
+	
+	
+draw_U:
+	li $t9, 256
+		li $t9, 256
+	move $t1, $t8
+	li $t2, 0
+
+draw_U_loop:
+	beq $t2, 6, draw_U_bottom
+	sw $t7, 0($t1)
+	sw $t7, 16($t1)
+	add $t1, $t1, $t9
+	addi $t2, $t2, 1
+	j draw_U_loop
+
+draw_U_bottom:
+	sw $t7, 0($t1)
+	sw $t7, 4($t1)
+	sw $t7, 8($t1)
+	sw $t7, 12($t1)
+	sw $t7, 16($t1)
+	jr $ra
+
+draw_N:
+	li $t9, 256        # row stride (bytes between rows)
+	move $t1, $t8      # $t1 = base address of 'n'
+
+	# Row 0: top solid bar (XXXXX)
+	sw $t7, 0($t1)
+	sw $t7, 4($t1)
+	sw $t7, 8($t1)
+	sw $t7, 12($t1)
+	sw $t7, 16($t1)
+
+	# Rows 1–6: only outer columns
+	li $t2, 0
+draw_n_body:
+	bge $t2, 6, done_draw_n
+	add $t1, $t1, $t9     # move to next row
+	sw $t7, 0($t1)        # left column
+	sw $t7, 16($t1)       # right column
+	addi $t2, $t2, 1
+	j draw_n_body
+
+done_draw_n:
+	jr $ra
+
+
+
 clear_doodle:
 	addi $sp, $sp, -4
 	sw $ra, 0($sp)
@@ -1065,8 +1756,26 @@ clear_doodle:
 	jr $ra
 
 delay_frame:
-	li $v0, 32        # syscall for sleep
-	li $a0, 40        # 40 milliseconds
+	la  $t0, slow_timer
+	lw  $t1, 0($t0)
+	beqz $t1, normal_speed
+
+	# Apply longer delay (e.g., 70ms instead of 40)
+	li   $v0, 32
+	li   $a0, 70
+	syscall
+
+	# Decrease slow_timer
+	subi $t1, $t1, 3
+	sw   $t1, 0($t0)
+	jr   $ra
+
+normal_speed:
+	la  $t2, slow_active
+	li  $t3, 1
+	sw  $t3, 0($t2)
+	li   $v0, 32
+	li   $a0, 40
 	syscall
 	jr $ra
 
@@ -1089,6 +1798,7 @@ handle_input:
 handle_restart:
 	jal randomise_platforms
 	jal spawn_coin_above_platform
+	jal spawn_slow_pickup
 	li $t0, 0
 	la $t1, score
 	sw $t0, 0($t1)     # ones
@@ -1098,6 +1808,7 @@ handle_restart:
 	sw $t0, gravity_counter
 	sw $t0, jump_counter
 	sw $t0, last_platform_index
+	sw $t0, slow_timer
 	jal draw_bg_and_plat
 	jal init_draw_doodle
 	j game_loop
@@ -1378,35 +2089,48 @@ draw_bg_and_plat:
 draw_platforms:
 	addi $sp, $sp, -4
 	sw   $ra, 0($sp)
+
 	la $t0, platforms         # base of platform array
 	lw $t1, num_platforms     # total number of platforms
 	li $t2, 0                 # platform index
 	li $t3, 16                # bytes per platform entry
 	li $t4, 64                # screen width in units
-	lw $t7, platform_colour
 
 platform_loop:
-	bge $t2, $t1, done_drawing # if index of platform > 4
+	bge $t2, $t1, done_drawing
 
-	mul $t5, $t2, $t3         # offset = i * 16, change platform
-	add $t8, $t0, $t5         # $t8 = platform[i] address
+	# Get platform[i] address
+	mul $t5, $t2, $t3
+	add $t8, $t0, $t5         # $t8 = platform[i] base address
 
 	lw $a0, 0($t8)            # row
 	lw $a1, 4($t8)            # col
+	lw $t6, 8($t8)            # type (0 = static, 1 = moving)
 
-    # Compute offset = (row * 64 + col) * 4
-	mul $t9, $a0, $t4         # row * 32
-	add $t9, $t9, $a1         # + col
-	sll $t9, $t9, 2           # * 4 (bytes per word)
-	add $t9, $t9, $s0         # final address
+	# Choose colour based on type
+	beqz $t6, use_static_colour
+	la $t9, moving_platform_colour
+	lw $t7, 0($t9)
+	j set_colour_done
 
-	jal draw_line
+use_static_colour:
+	la $t9, platform_colour
+	lw $t7, 0($t9)
 
-	addi $t2, $t2, 1          # i++
-	j platform_loop
+set_colour_done:
+	# Compute drawing address
+	mul $t9, $a0, $t4
+	add $t9, $t9, $a1
+	sll $t9, $t9, 2
+	add $t9, $t9, $s0
+
+    	jal draw_line
+
+    	addi $t2, $t2, 1
+    	j platform_loop
 
 done_drawing:
-	lw   $ra, 0($sp)
+    	lw $ra, 0($sp)
 	addi $sp, $sp, 4
 	jr $ra
 
@@ -1499,17 +2223,17 @@ draw_RESET:
 	jal draw_E
 
 	# Draw S
-	 addi $t8, $t6, 48
+	addi $t8, $t6, 48
 	jal draw_S
 
 	# Draw E
-	 addi $t8, $t6, 72
+	addi $t8, $t6, 72
 	jal draw_E
 
 	# Draw T
-	 addi $t8, $t6, 96
+	addi $t8, $t6, 96
 	jal draw_T
-	 lw $ra, 0($sp)
+	lw $ra, 0($sp)
 	addi $sp, $sp, 4
 	jr $ra
 
@@ -1704,12 +2428,13 @@ draw_W:
 	move $t1, $t8      # base address
 
 	# Row 0
-	sw $t7, 0($t1)
-	sw $t7, 16($t1)
+	sw $t7, 0($t1)     # left bar
+	sw $t7, 16($t1)    # right bar
 
 	# Row 1
 	add $t1, $t1, $t9
 	sw $t7, 0($t1)
+	sw $t7, 8($t1)     # middle bar starts here
 	sw $t7, 16($t1)
 
 	# Row 2
@@ -1733,37 +2458,47 @@ draw_W:
 	# Row 5
 	add $t1, $t1, $t9
 	sw $t7, 0($t1)
+	sw $t7, 8($t1)
 	sw $t7, 16($t1)
 
 	# Row 6
 	add $t1, $t1, $t9
+	sw $t7, 0($t1)
+	sw $t7, 4($t1)
 	sw $t7, 8($t1)
+	sw $t7, 12($t1)
+	sw $t7, 16($t1)
 
 	jr $ra
     
 draw_I:
-	li $t9, 256
-	  move $t1, $t8
+	li $t9, 256        # row stride (each row = 256 bytes)
+	move $t1, $t8      # base address
 
-	# Top bar
+	# Row 0
 	sw $t7, 0($t1)
 	sw $t7, 4($t1)
 	sw $t7, 8($t1)
+	sw $t7, 12($t1)
+	sw $t7, 16($t1)
 
-	# Rows 1–5: center column
+	# Row 1–5: center vertical stroke (only middle column)
 	li $t2, 0
 draw_I_loop:
-	beq $t2, 5, draw_I_bottom
+	bge $t2, 5, draw_I_bottom
 	add $t1, $t1, $t9
-	sw $t7, 4($t1)
+	sw $t7, 8($t1)       # center column (2nd word = 8 offset)
 	addi $t2, $t2, 1
 	j draw_I_loop
 
+# Row 6
 draw_I_bottom:
 	add $t1, $t1, $t9
 	sw $t7, 0($t1)
 	sw $t7, 4($t1)
 	sw $t7, 8($t1)
+	sw $t7, 12($t1)
+	sw $t7, 16($t1)
 	jr $ra    
     
     
