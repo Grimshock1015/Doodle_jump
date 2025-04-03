@@ -24,13 +24,13 @@
 # 4. Double jump, allowing player to double jump in mid air
 #
 # Link to video demonstration for final submission:
-# - (insert YouTube / MyMedia / other URL here). Make sure we can view it!
+# - https://youtu.be/W7YNHFM5e6s
 #
 # Are you OK with us sharing the video with people outside course staff?
-# - yes / no / yes, and please share this project github link as well!
+# - Yes 
 #
 # Any additional information that the TA needs to know:
-# - (write here, if any)
+# - N/A
 #
 #####################################################################
 
@@ -999,7 +999,7 @@ animate_coin:
 	lw $t4, 16($sp)
 	lw $ra, 20($sp)
 	addi $sp, $sp, 24
-	# Toggle: if current row == base row → move up, else → move back to base
+	# if current row == base row, move up, else move down
 	beq $t1, $t4, move_up
 
 move_down:
@@ -2177,10 +2177,10 @@ handle_a:
 	lw   $t1, 0($t0)        # row
 	lw   $t2, 4($t0)        # col
 
-    # Decrease col with wrap-around
 	li   $t3, 0
-	beq  $t2, $t3, wrap_left
-	subi $t2, $t2, 1
+	beq  $t2, $t3, save_doodle_pos   # at col 0 → don’t move
+	subi $t2, $t2, 1                 # else, move left
+
 	j save_doodle_pos
 
 wrap_left:
@@ -2192,15 +2192,10 @@ handle_d:
 	lw $t1, 0($t0)        # row
 	lw $t2, 4($t0)        # col
 
-	# Increase col with wrap-around
-	li $t3, 63
-	beq $t2, $t3, wrap_right
-	addi $t2, $t2, 1
-	j save_doodle_pos
-	
-	
-wrap_right:
-	li $t2, 0
+	li $t3, 61
+	beq $t2, $t3, save_doodle_pos   # at col 63 → don’t move
+	addi $t2, $t2, 1                # else, move right
+
 	j save_doodle_pos
     
 unknown_input:
